@@ -22,14 +22,14 @@ class UrlCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
           color: isStreaming
-              ? const Color(0xFF00E5FF).withOpacity(0.4)
-              : Colors.white.withOpacity(0.07),
+              ? const Color(0xFF00E5FF).withValues(alpha: 0.4)
+              : Colors.white.withValues(alpha: 0.07),
           width: 1.5,
         ),
         boxShadow: isStreaming
             ? [
           BoxShadow(
-            color: const Color(0xFF00E5FF).withOpacity(0.08),
+            color: const Color(0xFF00E5FF).withValues(alpha: 0.08),
             blurRadius: 20,
             spreadRadius: 2,
           )
@@ -42,7 +42,7 @@ class UrlCard extends StatelessWidget {
           Text(
             'RTSP URL',
             style: TextStyle(
-              color: Colors.white.withOpacity(0.35),
+              color: Colors.white.withValues(alpha: 0.35),
               fontSize: 11,
               letterSpacing: 1.5,
               fontWeight: FontWeight.bold,
@@ -57,7 +57,7 @@ class UrlCard extends StatelessWidget {
                   style: TextStyle(
                     color: isStreaming
                         ? const Color(0xFF00E5FF)
-                        : Colors.white.withOpacity(0.7),
+                        : Colors.white.withValues(alpha: 0.7),
                     fontSize: 14,
                     fontWeight: FontWeight.bold,
                     letterSpacing: 0.3,
@@ -71,8 +71,8 @@ class UrlCard extends StatelessWidget {
                   padding: const EdgeInsets.all(8),
                   decoration: BoxDecoration(
                     color: isStreaming
-                        ? const Color(0xFF00E5FF).withOpacity(0.15)
-                        : Colors.white.withOpacity(0.07),
+                        ? const Color(0xFF00E5FF).withValues(alpha: 0.15)
+                        : Colors.white.withValues(alpha: 0.07),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Icon(
@@ -80,7 +80,7 @@ class UrlCard extends StatelessWidget {
                     size: 16,
                     color: isStreaming
                         ? const Color(0xFF00E5FF)
-                        : Colors.white.withOpacity(0.4),
+                        : Colors.white.withValues(alpha: 0.4),
                   ),
                 ),
               ),
@@ -91,7 +91,7 @@ class UrlCard extends StatelessWidget {
             Text(
               '● LIVE — Ready to connect in VLC',
               style: TextStyle(
-                color: const Color(0xFF00E57F).withOpacity(0.8),
+                color: const Color(0xFF00E57F).withValues(alpha: 0.8),
                 fontSize: 12,
                 letterSpacing: 0.5,
               ),

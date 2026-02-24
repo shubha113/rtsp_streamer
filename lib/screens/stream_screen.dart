@@ -1,10 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import '../services/rtsp_service.dart';
-import '../widgets/url_card.dart';
-import '../widgets/status_indicator.dart';
-import '../widgets/control_button.dart';
+import '../widgets/watch_url_card.dart';
 
 class StreamScreen extends StatefulWidget {
   const StreamScreen({super.key});
@@ -17,13 +18,24 @@ class _StreamScreenState extends State<StreamScreen>
     with SingleTickerProviderStateMixin {
   bool _isStreaming = false;
   bool _isLoading = false;
-  bool _torchOn = false;
   String? _deviceIp;
   String? _errorMessage;
-  int _port = 8554;
+
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
   Timer? _statusTimer;
+
+  String? _watchUrl;
+  String? _qrCodeBase64;
+  String? _streamId;
+  String? _deviceName;
+  bool _isRegistering = false;
+  int _viewerCount = 0;
+
+  static const String _serverIp = '192.168.0.102';
+  static const String _backendUrl = 'http://$_serverIp:3001';
+  static const String _mediamtxIp = _serverIp;
+  static const int _rtspPort = 8554;
 
   @override
   void initState() {
@@ -35,22 +47,26 @@ class _StreamScreenState extends State<StreamScreen>
     _pulseAnimation = Tween(begin: 0.6, end: 1.0).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
+    _generateStreamIdentity();
     _init();
   }
 
-  Future<void> _init() async {
-    await _fetchIp();
-    await _checkIfAlreadyStreaming();
+  void _generateStreamIdentity() {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    final random = Random.secure();
+    final suffix = List.generate(
+      6,
+      (_) => chars[random.nextInt(chars.length)],
+    ).join();
+    _streamId = 'cam_$suffix';
+    _deviceName = 'Camera ${suffix.substring(0, 4).toUpperCase()}';
   }
 
-  Future<void> _fetchIp() async {
+  Future<void> _init() async {
     try {
       final ip = await RtspService.getDeviceIp();
-      setState(() => _deviceIp = ip);
+      if (mounted) setState(() => _deviceIp = ip);
     } catch (_) {}
-  }
-
-  Future<void> _checkIfAlreadyStreaming() async {
     final streaming = await RtspService.isStreaming();
     if (mounted) setState(() => _isStreaming = streaming);
   }
@@ -62,70 +78,142 @@ class _StreamScreenState extends State<StreamScreen>
     });
 
     try {
-      // Check/request permissions first
-      bool hasPermission = await RtspService.checkPermissions();
-      if (!hasPermission) {
-        hasPermission = await RtspService.requestPermissions();
+      if (!await RtspService.checkPermissions()) {
+        if (!await RtspService.requestPermissions()) {
+          setState(() {
+            _errorMessage =
+                'Camera permission required.\nGo to Settings → App → Permissions.';
+            _isLoading = false;
+          });
+          return;
+        }
       }
 
-      if (!hasPermission) {
+      // 2. Refresh IP
+      final ip = await RtspService.getDeviceIp();
+      if (ip == null) {
+        setState(() {
+          _errorMessage = 'Could not detect device IP. Connect to WiFi first.';
+          _isLoading = false;
+        });
+        return;
+      }
+      setState(() => _deviceIp = ip);
+
+      final success = await RtspService.startServer(
+        mediamtxIp: _mediamtxIp,
+        streamId: _streamId!,
+        port: _rtspPort,
+      );
+
+      if (!success) {
         setState(() {
           _errorMessage =
-          'Camera and microphone permissions are required.\nGo to Settings → App → Permissions.';
+              'Failed to connect to MediaMTX.\n'
+              'Make sure MediaMTX is running at $_mediamtxIp:$_rtspPort\n'
+              'and your phone is on the same WiFi.';
           _isLoading = false;
         });
         return;
       }
 
-      // Refresh IP before starting
-      await _fetchIp();
+      setState(() => _isStreaming = true);
 
-      final success = await RtspService.startServer(port: _port);
+      await _registerWithBackend();
 
-      if (success) {
-        setState(() => _isStreaming = true);
-        // Poll status every 5 seconds
-        _statusTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
-          final live = await RtspService.isStreaming();
-          if (mounted && !live) {
+      _statusTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+        final live = await RtspService.isStreaming();
+        if (mounted) {
+          if (!live) {
             setState(() => _isStreaming = false);
             _statusTimer?.cancel();
+          } else {
+            _updateViewerCount();
           }
-        });
-      } else {
-        setState(() => _errorMessage = 'Failed to start server. Check logs.');
-      }
+        }
+      });
     } catch (e) {
       setState(() => _errorMessage = e.toString());
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  Future<void> _registerWithBackend() async {
+    setState(() => _isRegistering = true);
+    try {
+      final res = await http
+          .post(
+            Uri.parse('$_backendUrl/api/register'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'mobileIp': _deviceIp,
+              'streamId': _streamId,
+              'deviceName': _deviceName,
+            }),
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        setState(() {
+          _watchUrl = data['watchUrl'] as String?;
+          _qrCodeBase64 = data['qrCode'] as String?;
+        });
+      } else {
+        setState(() => _errorMessage = 'Backend error: ${res.statusCode}');
+      }
+    } catch (e) {
+      setState(
+        () => _errorMessage =
+            'Stream is live but backend unreachable: $e\n'
+            'Make sure Node server is running at $_backendUrl',
+      );
+    } finally {
+      if (mounted) setState(() => _isRegistering = false);
+    }
+  }
+
+  Future<void> _updateViewerCount() async {
+    if (_streamId == null) return;
+    try {
+      final res = await http
+          .get(Uri.parse('$_backendUrl/api/stream/$_streamId'))
+          .timeout(const Duration(seconds: 5));
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        final count = data['viewers'] as int? ?? 0;
+        if (mounted && count != _viewerCount)
+          setState(() => _viewerCount = count);
+      }
+    } catch (_) {}
   }
 
   Future<void> _stopStreaming() async {
     setState(() => _isLoading = true);
     _statusTimer?.cancel();
-    try {
-      await RtspService.stopServer();
-      setState(() => _isStreaming = false);
-    } catch (e) {
-      setState(() => _errorMessage = e.toString());
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
-    }
-  }
 
-  Future<void> _switchCamera() async {
-    try {
-      await RtspService.switchCamera();
-    } catch (e) {
-      _showSnack('Could not switch camera: $e');
+    // Unregister from backend
+    if (_streamId != null) {
+      try {
+        await http
+            .post(
+              Uri.parse('$_backendUrl/api/unregister'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({'streamId': _streamId}),
+            )
+            .timeout(const Duration(seconds: 5));
+      } catch (_) {}
     }
-  }
 
-  Future<void> _toggleTorch() async {
-    await RtspService.toggleTorch();
-    setState(() => _torchOn = !_torchOn);
+    await RtspService.stopServer();
+    setState(() {
+      _isStreaming = false;
+      _watchUrl = null;
+      _qrCodeBase64 = null;
+      _viewerCount = 0;
+    });
+    if (mounted) setState(() => _isLoading = false);
   }
 
   void _showSnack(String msg) {
@@ -136,11 +224,6 @@ class _StreamScreenState extends State<StreamScreen>
         behavior: SnackBarBehavior.floating,
       ),
     );
-  }
-
-  String get _rtspUrl {
-    final ip = _deviceIp ?? '0.0.0.0';
-    return 'rtsp://$ip:$_port/live';
   }
 
   @override
@@ -161,37 +244,38 @@ class _StreamScreenState extends State<StreamScreen>
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _buildHeader(),
-              const SizedBox(height: 28),
-              StatusIndicator(
-                isStreaming: _isStreaming,
-                pulseAnimation: _pulseAnimation,
-              ),
               const SizedBox(height: 24),
-              UrlCard(
-                url: _rtspUrl,
-                isStreaming: _isStreaming,
-                onCopy: () {
-                  Clipboard.setData(ClipboardData(text: _rtspUrl));
-                  _showSnack('URL copied to clipboard!');
-                },
-              ),
+
+              _buildStatusCard(),
               const SizedBox(height: 20),
-              _buildPortRow(),
-              const SizedBox(height: 32),
-              ControlButton(
-                isStreaming: _isStreaming,
-                isLoading: _isLoading,
-                onStart: _startStreaming,
-                onStop: _stopStreaming,
-              ),
-              if (_errorMessage != null) ...[
+
+              if (_watchUrl != null && _qrCodeBase64 != null) ...[
+                WatchUrlCard(
+                  watchUrl: _watchUrl!,
+                  qrCodeBase64: _qrCodeBase64!,
+                  deviceName: _deviceName ?? 'Camera',
+                  streamId: _streamId!,
+                  viewerCount: _viewerCount,
+                  onCopy: () {
+                    Clipboard.setData(ClipboardData(text: _watchUrl!));
+                    _showSnack('Watch URL copied!');
+                  },
+                ),
                 const SizedBox(height: 20),
-                _buildErrorBox(),
               ],
-              const SizedBox(height: 32),
-              _buildVlcInstructions(),
+
+              if (_isStreaming && _watchUrl == null && _isRegistering)
+                _buildRegistering(),
+
+              if (_errorMessage != null) ...[
+                _buildErrorBox(),
+                const SizedBox(height: 20),
+              ],
+
+              _buildControlButton(),
               const SizedBox(height: 20),
               _buildNetworkInfo(),
+              const SizedBox(height: 20),
             ],
           ),
         ),
@@ -199,294 +283,326 @@ class _StreamScreenState extends State<StreamScreen>
     );
   }
 
-  Widget _buildHeader() {
-    return Row(
-      children: [
-        Container(
-          width: 42,
-          height: 42,
-          decoration: BoxDecoration(
-            color: const Color(0xFF00E5FF).withOpacity(0.12),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.3)),
-          ),
-          child: const Icon(
-            Icons.videocam_rounded,
-            color: Color(0xFF00E5FF),
-            size: 22,
-          ),
-        ),
-        const SizedBox(width: 12),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'RTSP Streamer',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 0.5,
-              ),
-            ),
-            Text(
-              'LAN · VLC Compatible',
-              style: TextStyle(
-                color: Colors.white.withOpacity(0.4),
-                fontSize: 12,
-                letterSpacing: 1.2,
-              ),
-            ),
-          ],
-        ),
-        const Spacer(),
-        IconButton(
-          onPressed: _init,
-          icon: Icon(
-            Icons.refresh_rounded,
-            color: Colors.white.withOpacity(0.5),
-          ),
-          tooltip: 'Refresh IP',
-        ),
-      ],
-    );
-  }
-
-  Widget _buildPortRow() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: const Color(0xFF13131F),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white.withOpacity(0.07)),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.settings_ethernet, color: const Color(0xFF00E5FF).withOpacity(0.7), size: 18),
-          const SizedBox(width: 10),
-          Text(
-            'Port',
-            style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 13),
-          ),
-          const Spacer(),
-          _portChip(1935),
-          const SizedBox(width: 8),
-          _portChip(8554),
-          const SizedBox(width: 8),
-          _portChip(554),
-        ],
-      ),
-    );
-  }
-
-  Widget _portChip(int port) {
-    final selected = _port == port;
-    return GestureDetector(
-      onTap: _isStreaming ? null : () => setState(() => _port = port),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+  Widget _buildHeader() => Row(
+    children: [
+      Container(
+        width: 44,
+        height: 44,
         decoration: BoxDecoration(
-          color: selected
-              ? const Color(0xFF00E5FF).withOpacity(0.18)
-              : Colors.white.withOpacity(0.05),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: selected
-                ? const Color(0xFF00E5FF).withOpacity(0.6)
-                : Colors.transparent,
-          ),
-        ),
-        child: Text(
-          '$port',
-          style: TextStyle(
-            color: selected ? const Color(0xFF00E5FF) : Colors.white.withOpacity(0.4),
-            fontSize: 13,
-            fontWeight: selected ? FontWeight.bold : FontWeight.normal,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _iconButton({
-    required IconData icon,
-    required String label,
-    required VoidCallback onTap,
-    bool active = false,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 14),
-        decoration: BoxDecoration(
-          color: active
-              ? const Color(0xFFFFD600).withOpacity(0.1)
-              : const Color(0xFF13131F),
+          color: const Color(0xFF00E5FF).withValues(alpha: 0.12),
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: active
-                ? const Color(0xFFFFD600).withOpacity(0.4)
-                : Colors.white.withOpacity(0.08),
+            color: const Color(0xFF00E5FF).withValues(alpha: 0.3),
           ),
         ),
-        child: Column(
-          children: [
-            Icon(
-              icon,
-              color: active ? const Color(0xFFFFD600) : Colors.white.withOpacity(0.6),
-              size: 22,
-            ),
-            const SizedBox(height: 6),
-            Text(
-              label,
-              style: TextStyle(
-                color: active ? const Color(0xFFFFD600) : Colors.white.withOpacity(0.4),
-                fontSize: 11,
-              ),
-            ),
-          ],
+        child: const Icon(
+          Icons.videocam_rounded,
+          color: Color(0xFF00E5FF),
+          size: 22,
         ),
       ),
-    );
-  }
-
-  Widget _buildErrorBox() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: const Color(0xFFFF1744).withOpacity(0.08),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFFF1744).withOpacity(0.3)),
-      ),
-      child: Row(
+      const SizedBox(width: 12),
+      Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.error_outline, color: Color(0xFFFF1744), size: 18),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              _errorMessage!,
-              style: const TextStyle(color: Color(0xFFFF1744), fontSize: 13, height: 1.5),
-            ),
-          ),
-          GestureDetector(
-            onTap: () => setState(() => _errorMessage = null),
-            child: Icon(Icons.close, color: const Color(0xFFFF1744).withOpacity(0.6), size: 18),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildVlcInstructions() {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF13131F),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.white.withOpacity(0.06)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.play_circle_outline, color: Color(0xFFFF9800), size: 18),
-              const SizedBox(width: 8),
-              Text(
-                'Open in VLC',
-                style: TextStyle(
-                  color: Colors.white.withOpacity(0.9),
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          _step('1', 'Start streaming on this device'),
-          _step('2', 'Open VLC on your computer'),
-          _step('3', 'Media → Open Network Stream'),
-          _step('4', 'Paste the RTSP URL above'),
-          _step('5', 'Click Play — live video starts!'),
-          const SizedBox(height: 10),
-          Text(
-            '⚠  Both devices must be on the same WiFi network.',
+          const Text(
+            'RTSP → WebRTC',
             style: TextStyle(
-              color: Colors.white.withOpacity(0.3),
-              fontSize: 11,
-              fontStyle: FontStyle.italic,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _step(String num, String text) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 20,
-            height: 20,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: const Color(0xFF00E5FF).withOpacity(0.15),
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: Text(
-              num,
-              style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 11, fontWeight: FontWeight.bold),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              text,
-              style: TextStyle(color: Colors.white.withOpacity(0.6), fontSize: 13),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildNetworkInfo() {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: const Color(0xFF0D1B2A),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.08)),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.wifi, color: const Color(0xFF00E5FF).withOpacity(0.5), size: 18),
-          const SizedBox(width: 10),
-          Text(
-            'Device IP: ',
-            style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 13),
-          ),
-          Text(
-            _deviceIp ?? 'Not connected',
-            style: TextStyle(
-              color: _deviceIp != null ? const Color(0xFF00E5FF) : Colors.red.withOpacity(0.6),
-              fontSize: 13,
+              color: Colors.white,
+              fontSize: 20,
               fontWeight: FontWeight.bold,
             ),
           ),
-          const Spacer(),
           Text(
-            'Port $_port',
-            style: TextStyle(color: Colors.white.withOpacity(0.25), fontSize: 12),
+            'Powered by MediaMTX',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.4),
+              fontSize: 12,
+            ),
           ),
         ],
       ),
+    ],
+  );
+
+  Widget _buildStatusCard() {
+    return AnimatedBuilder(
+      animation: _pulseAnimation,
+      builder: (_, __) => Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFF13131F),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: _isStreaming
+                ? const Color(
+                    0xFF00E57F,
+                  ).withOpacity(_pulseAnimation.value * 0.6)
+                : Colors.white.withValues(alpha: 0.07),
+          ),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 10,
+              height: 10,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: _isStreaming ? const Color(0xFF00E57F) : Colors.grey,
+                boxShadow: _isStreaming
+                    ? [
+                        BoxShadow(
+                          color: const Color(0xFF00E57F).withValues(alpha: 0.5),
+                          blurRadius: 8 * _pulseAnimation.value,
+                          spreadRadius: 2 * _pulseAnimation.value,
+                        ),
+                      ]
+                    : null,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _isStreaming
+                        ? 'LIVE — Publishing to MediaMTX'
+                        : 'Ready to stream',
+                    style: TextStyle(
+                      color: _isStreaming
+                          ? const Color(0xFF00E57F)
+                          : Colors.white.withValues(alpha: 0.6),
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  if (_streamId != null)
+                    Text(
+                      '$_deviceName  ·  ID: $_streamId',
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.4),
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            if (_isStreaming && _viewerCount > 0)
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF00E57F).withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.remove_red_eye,
+                      color: Color(0xFF00E57F),
+                      size: 14,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      '$_viewerCount',
+                      style: const TextStyle(
+                        color: Color(0xFF00E57F),
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
+
+  Widget _buildRegistering() => Container(
+    padding: const EdgeInsets.all(14),
+    margin: const EdgeInsets.only(bottom: 20),
+    decoration: BoxDecoration(
+      color: const Color(0xFF13131F),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+    ),
+    child: Row(
+      children: [
+        const SizedBox(
+          width: 16,
+          height: 16,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            valueColor: AlwaysStoppedAnimation(Color(0xFF00E5FF)),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Text(
+          'Registering with backend...',
+          style: TextStyle(
+            color: Colors.white.withValues(alpha: 0.6),
+            fontSize: 13,
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _buildControlButton() {
+    return SizedBox(
+      width: double.infinity,
+      height: 54,
+      child: ElevatedButton(
+        onPressed: _isLoading
+            ? null
+            : (_isStreaming ? _stopStreaming : _startStreaming),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: _isStreaming
+              ? const Color(0xFFFF1744)
+              : const Color(0xFF00E5FF),
+          foregroundColor: _isStreaming ? Colors.white : Colors.black,
+          disabledBackgroundColor: Colors.grey.withValues(alpha: 0.3),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+          elevation: 0,
+        ),
+        child: _isLoading
+            ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.white,
+                ),
+              )
+            : Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    _isStreaming
+                        ? Icons.stop_rounded
+                        : Icons.play_arrow_rounded,
+                    size: 22,
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    _isStreaming ? 'STOP STREAMING' : 'START STREAMING',
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
+                ],
+              ),
+      ),
+    );
+  }
+
+  Widget _buildErrorBox() => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(
+      color: const Color(0xFFFF1744).withValues(alpha: 0.08),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: const Color(0xFFFF1744).withValues(alpha: 0.3)),
+    ),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Icon(Icons.error_outline, color: Color(0xFFFF1744), size: 18),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            _errorMessage!,
+            style: const TextStyle(
+              color: Color(0xFFFF1744),
+              fontSize: 13,
+              height: 1.5,
+            ),
+          ),
+        ),
+        GestureDetector(
+          onTap: () => setState(() => _errorMessage = null),
+          child: Icon(
+            Icons.close,
+            color: const Color(0xFFFF1744).withValues(alpha: 0.6),
+            size: 18,
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _buildNetworkInfo() => Container(
+    padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(
+      color: const Color(0xFF0D1B2A),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(
+        color: const Color(0xFF00E5FF).withValues(alpha: 0.08),
+      ),
+    ),
+    child: Column(
+      children: [
+        _netRow(
+          Icons.phone_android_rounded,
+          'Phone IP',
+          _deviceIp ?? 'Not on WiFi',
+          _deviceIp != null,
+        ),
+        const SizedBox(height: 6),
+        _netRow(Icons.dns_rounded, 'MediaMTX', '$_mediamtxIp:$_rtspPort', true),
+        const SizedBox(height: 6),
+        _netRow(Icons.cloud_rounded, 'Backend', _backendUrl, true),
+        const SizedBox(height: 6),
+        _netRow(
+          Icons.key_rounded,
+          'Stream ID',
+          _streamId ?? '-',
+          _streamId != null,
+        ),
+      ],
+    ),
+  );
+
+  Widget _netRow(IconData icon, String label, String value, bool ok) => Row(
+    children: [
+      Icon(
+        icon,
+        color: const Color(0xFF00E5FF).withValues(alpha: 0.5),
+        size: 16,
+      ),
+      const SizedBox(width: 8),
+      Text(
+        '$label: ',
+        style: TextStyle(
+          color: Colors.white.withValues(alpha: 0.4),
+          fontSize: 12,
+        ),
+      ),
+      Expanded(
+        child: Text(
+          value,
+          style: TextStyle(
+            color: ok
+                ? const Color(0xFF00E5FF)
+                : Colors.red.withValues(alpha: 0.6),
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+            fontFamily: 'monospace',
+          ),
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
+    ],
+  );
 }

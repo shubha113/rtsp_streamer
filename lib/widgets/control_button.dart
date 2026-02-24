@@ -33,8 +33,8 @@ class ControlButton extends StatelessWidget {
           boxShadow: [
             BoxShadow(
               color: isStreaming
-                  ? const Color(0xFFFF1744).withOpacity(0.35)
-                  : const Color(0xFF00E5FF).withOpacity(0.35),
+                  ? const Color(0xFFFF1744).withValues(alpha: 0.35)
+                  : const Color(0xFF00E5FF).withValues(alpha: 0.35),
               blurRadius: 20,
               spreadRadius: 0,
               offset: const Offset(0, 6),

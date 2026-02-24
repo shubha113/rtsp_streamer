@@ -16,13 +16,13 @@ class StatusIndicator extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
         color: isStreaming
-            ? const Color(0xFF00E57F).withOpacity(0.07)
+            ? const Color(0xFF00E57F).withValues(alpha: 0.07)
             : const Color(0xFF13131F),
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
           color: isStreaming
-              ? const Color(0xFF00E57F).withOpacity(0.25)
-              : Colors.white.withOpacity(0.06),
+              ? const Color(0xFF00E57F).withValues(alpha: 0.25)
+              : Colors.white.withValues(alpha: 0.06),
         ),
       ),
       child: Row(
@@ -38,12 +38,12 @@ class StatusIndicator extends StatelessWidget {
                   decoration: BoxDecoration(
                     color: isStreaming
                         ? const Color(0xFF00E57F)
-                        : Colors.white.withOpacity(0.2),
+                        : Colors.white.withValues(alpha: 0.2),
                     shape: BoxShape.circle,
                     boxShadow: isStreaming
                         ? [
                       BoxShadow(
-                        color: const Color(0xFF00E57F).withOpacity(0.5),
+                        color: const Color(0xFF00E57F).withValues(alpha: 0.5),
                         blurRadius: 8,
                         spreadRadius: 2,
                       )
@@ -60,7 +60,7 @@ class StatusIndicator extends StatelessWidget {
             style: TextStyle(
               color: isStreaming
                   ? const Color(0xFF00E57F)
-                  : Colors.white.withOpacity(0.35),
+                  : Colors.white.withValues(alpha: 0.35),
               fontSize: 13,
               fontWeight: FontWeight.bold,
               letterSpacing: 1.0,
@@ -71,7 +71,7 @@ class StatusIndicator extends StatelessWidget {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
-                color: const Color(0xFF00E57F).withOpacity(0.15),
+                color: const Color(0xFF00E57F).withValues(alpha: 0.15),
                 borderRadius: BorderRadius.circular(20),
               ),
               child: const Text(
