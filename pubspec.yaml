@@ -20,6 +20,11 @@ dev_dependencies:
     sdk: flutter
 
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.13.1
+
+flutter_launcher_icons:
+    android: true
+    image_path: "assets/cofee.png"
 
 flutter:
 
