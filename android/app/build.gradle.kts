@@ -44,8 +44,6 @@ flutter {
 }
 
 dependencies {
-    // ✅ Zero external RTSP libraries needed.
-    // Camera2 + MediaCodec + ServerSocket are all in the Android SDK.
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
 }
